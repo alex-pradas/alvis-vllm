@@ -391,9 +391,13 @@ start_vllm_streaming() {
     info "Streaming from: ${slurm_out}"
     info "Waiting for vLLM output to start..."
     echo ""
+    echo "────────────────────────────────────────────────────────────────"
+    info "vLLM output will appear below with timestamps"
+    echo "────────────────────────────────────────────────────────────────"
+    echo ""
 
     # Stream from SLURM output file via SSH to LOGIN node
-    # Filter lines after the vLLM output marker
+    # Filter lines after the vLLM output marker and add timestamps
     (
         ssh "${SSH_HOST}" bash -s "${slurm_out}" <<'REMOTE_SCRIPT'
             slurm_out="$1"
@@ -401,6 +405,11 @@ start_vllm_streaming() {
             # Define colors in the remote script
             BLUE='\033[0;34m'
             NC='\033[0m'
+
+            # Function to get timestamp
+            get_timestamp() {
+                date +"%H:%M:%S"
+            }
 
             # Wait for the SLURM output file to be created (up to 30 seconds)
             for i in {1..30}; do
@@ -432,9 +441,10 @@ start_vllm_streaming() {
                     continue
                 fi
 
-                # Show lines after the marker
+                # Show lines after the marker with timestamp
                 if [[ -n "$started" ]]; then
-                    printf "${BLUE}[vLLM]${NC} %s\n" "$line"
+                    timestamp=$(get_timestamp)
+                    printf "[%s] ${BLUE}[vLLM]${NC} %s\n" "$timestamp" "$line"
                 fi
             done
 REMOTE_SCRIPT
