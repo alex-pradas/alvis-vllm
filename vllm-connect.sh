@@ -269,6 +269,7 @@ wait_for_job_start() {
 
     local elapsed=0
     local node_name=""
+    local last_state=""
 
     while [[ $elapsed -lt $JOB_START_TIMEOUT ]]; do
         # Check job status
@@ -283,13 +284,21 @@ wait_for_job_start() {
         local job_state=$(echo "$job_info" | awk '{print $1}')
         node_name=$(echo "$job_info" | awk '{print $2}')
 
+        # Show state changes
+        if [[ "$job_state" != "$last_state" && -n "$last_state" ]]; then
+            echo ""
+            info "Job state changed: ${last_state} → ${job_state}"
+        fi
+        last_state="$job_state"
+
         if [[ "$job_state" == "RUNNING" ]]; then
+            echo ""
             success "Job is running on node: ${node_name}"
             echo "$node_name"
             return 0
         fi
 
-        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for job to start... (${elapsed}s/${JOB_START_TIMEOUT}s)"
+        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for job to start (state: ${job_state})... (${elapsed}s/${JOB_START_TIMEOUT}s)"
         sleep 5
         elapsed=$((elapsed + 5))
     done
@@ -325,7 +334,9 @@ wait_for_server_address() {
         server_address=$(ssh "${SSH_HOST}" "cat ${tmpdir}/server_address.txt 2>/dev/null" || echo "")
 
         if [[ -n "$server_address" ]]; then
-            success "Server address: ${server_address}"
+            echo ""
+            success "vLLM is launching on ${server_address}"
+            info "Server is loading the model, this may take a few minutes..."
             echo "${server_address}|${tmpdir}"
             return 0
         fi
@@ -375,21 +386,31 @@ establish_tunnel() {
     fi
 
     # Test connection
-    info "Testing connection..."
+    info "Testing connection to vLLM server..."
 
     local retries=0
     local max_retries=10
 
     while [[ $retries -lt $max_retries ]]; do
         if curl -s --max-time "${CONNECTION_TEST_TIMEOUT}" "http://localhost:${LOCAL_PORT}/v1/models" >/dev/null 2>&1; then
-            success "Connection successful! Server available at http://localhost:${LOCAL_PORT}"
+            echo ""
+            success "vLLM server is ready!"
+            success "Connection successful at http://localhost:${LOCAL_PORT}"
+            echo ""
+            info "API Endpoints:"
+            info "  - Models:      http://localhost:${LOCAL_PORT}/v1/models"
+            info "  - Completions: http://localhost:${LOCAL_PORT}/v1/completions"
+            info "  - Chat:        http://localhost:${LOCAL_PORT}/v1/chat/completions"
+            echo ""
             return 0
         fi
 
+        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (attempt ${retries}/${max_retries})"
         retries=$((retries + 1))
         sleep 2
     done
 
+    echo ""
     error "Connection test failed after ${max_retries} attempts"
     exit 1
 }
