@@ -396,7 +396,7 @@ start_vllm_streaming() {
     # Wait up to 30 seconds for the TMPDIR line to appear
     local wait_time=0
     while [[ $wait_time -lt 30 ]]; do
-        tmpdir=$(ssh -o ConnectTimeout=10 "${SSH_HOST}" "grep -oP 'Output will be written to: \K[^/]+(?=/vllm)' ${slurm_out} 2>/dev/null | head -1" || echo "")
+        tmpdir=$(ssh -o ConnectTimeout=10 "${SSH_HOST}" "grep -oP 'Output will be written to: \K\S+(?=/vllm\.out)' ${slurm_out} 2>/dev/null | head -1" || echo "")
         if [[ -n "$tmpdir" ]]; then
             break
         fi
