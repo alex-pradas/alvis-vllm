@@ -27,6 +27,8 @@ CONNECTION_TEST_TIMEOUT=30
 JOB_ID=""
 SSH_TUNNEL_PID=""
 LOG_STREAM_PID=""
+NODE_NAME=""
+SERVER_INFO=""
 
 # Color codes
 RED='\033[0;31m'
@@ -103,6 +105,34 @@ spinner() {
         sleep 0.2
     done
     printf "\r"
+}
+
+# Timeout function for macOS compatibility
+# Usage: run_with_timeout <seconds> <command> [args...]
+run_with_timeout() {
+    local timeout=$1
+    shift
+
+    # Run command in background
+    "$@" &
+    local pid=$!
+
+    # Wait for timeout or command completion
+    local count=0
+    while kill -0 $pid 2>/dev/null && [ $count -lt $timeout ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+
+    # Kill if still running
+    if kill -0 $pid 2>/dev/null; then
+        kill -9 $pid 2>/dev/null
+        wait $pid 2>/dev/null
+        return 124  # timeout exit code
+    fi
+
+    wait $pid
+    return $?
 }
 
 # Show help message
@@ -240,7 +270,7 @@ submit_job() {
     info "Submitting job (duration: ${job_duration})..."
 
     local submit_output
-    if ! submit_output=$(ssh "${SSH_HOST}" "cat > /tmp/jobscript_$$.sh && sbatch /tmp/jobscript_$$.sh && rm /tmp/jobscript_$$.sh" < "${temp_jobscript}" 2>&1); then
+    if ! submit_output=$(ssh -o ConnectTimeout=30 "${SSH_HOST}" "cat > /tmp/jobscript_$$.sh && sbatch /tmp/jobscript_$$.sh && rm /tmp/jobscript_$$.sh" < "${temp_jobscript}" 2>&1); then
         error "Failed to submit job"
         error "${submit_output}"
         rm "${temp_jobscript}"
@@ -265,6 +295,7 @@ submit_job() {
 # ============================================================================
 
 wait_for_job_start() {
+    echo ""
     info "Waiting for job to start..."
 
     local elapsed=0
@@ -272,17 +303,35 @@ wait_for_job_start() {
     local last_state=""
 
     while [[ $elapsed -lt $JOB_START_TIMEOUT ]]; do
-        # Check job status
+        # Check job status with timeout (force kill after 15 seconds)
         local job_info
-        job_info=$(ssh "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%T %N'" 2>/dev/null || echo "")
+        job_info=$(run_with_timeout 15 ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%T %N'" 2>/dev/null || echo "")
 
         if [[ -z "$job_info" ]]; then
-            error "Job ${JOB_ID} not found in queue. It may have failed immediately."
-            exit 1
+            warning "Could not get job status (timeout or connection issue), retrying..."
+            sleep 2
+            elapsed=$((elapsed + 2))
+            continue
         fi
 
         local job_state=$(echo "$job_info" | awk '{print $1}')
         node_name=$(echo "$job_info" | awk '{print $2}')
+
+        # Get queue info if in PENDING state
+        local queue_info=""
+        if [[ "$job_state" == "PENDING" ]]; then
+            # Get position among pending jobs (sorted by priority)
+            local queue_data=$(run_with_timeout 10 ssh -o ConnectTimeout=5 "${SSH_HOST}" \
+                "squeue -p alvis -t PENDING -h -o '%i %Q' | sort -k2 -rn | awk '{print \$1}' | grep -n '^${JOB_ID}\$' | cut -d: -f1" 2>/dev/null || echo "")
+            local pending_count=$(run_with_timeout 10 ssh -o ConnectTimeout=5 "${SSH_HOST}" \
+                "squeue -p alvis -t PENDING -h | wc -l" 2>/dev/null | tr -d ' ' || echo "")
+
+            if [[ -n "$queue_data" && -n "$pending_count" ]]; then
+                queue_info=" (position ${queue_data}/${pending_count})"
+            elif [[ -n "$pending_count" && "$pending_count" -gt 0 ]]; then
+                queue_info=" (${pending_count} pending)"
+            fi
+        fi
 
         # Show state changes
         if [[ "$job_state" != "$last_state" && -n "$last_state" ]]; then
@@ -294,12 +343,14 @@ wait_for_job_start() {
         if [[ "$job_state" == "RUNNING" ]]; then
             echo ""
             success "Job is running on node: ${node_name}"
-            echo "$node_name"
+            NODE_NAME="$node_name"
             return 0
         fi
 
         local ts=$(timestamp)
-        echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for job to start (state: ${job_state})... (${elapsed}s/${JOB_START_TIMEOUT}s)    "
+        printf "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for job to start (state: ${job_state}${queue_info})... (${elapsed}s/${JOB_START_TIMEOUT}s)    " >&2
+        # Force flush to stderr
+        >&2
         sleep 5
         elapsed=$((elapsed + 5))
     done
@@ -321,24 +372,26 @@ wait_for_server_address() {
     local elapsed=0
     local server_address=""
 
-    # First, discover the TMPDIR for this job
-    local tmpdir
-    tmpdir=$(ssh "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%Z'" 2>/dev/null || echo "")
+    # Get the SLURM output file location
+    local workdir
+    workdir=$(run_with_timeout 15 ssh -o ConnectTimeout=10 "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%Z'" 2>/dev/null || echo "")
 
-    if [[ -z "$tmpdir" ]]; then
-        error "Could not determine TMPDIR for job ${JOB_ID}"
+    if [[ -z "$workdir" ]]; then
+        error "Could not determine work directory for job ${JOB_ID}"
         exit 1
     fi
 
+    local slurm_out="${workdir}/slurm-${JOB_ID}.out"
+
     while [[ $elapsed -lt $SERVER_READY_TIMEOUT ]]; do
-        # Try to read server_address.txt from remote TMPDIR
-        server_address=$(ssh "${SSH_HOST}" "cat ${tmpdir}/server_address.txt 2>/dev/null" || echo "")
+        # Parse server address from SLURM output file
+        server_address=$(run_with_timeout 15 ssh -o ConnectTimeout=10 "${SSH_HOST}" "grep -oP 'Server will run at \K[^[:space:]]+' ${slurm_out} 2>/dev/null" || echo "")
 
         if [[ -n "$server_address" ]]; then
             echo ""
             success "vLLM is launching on ${server_address}"
             info "Server is loading the model, this may take a few minutes..."
-            echo "${server_address}|${tmpdir}"
+            SERVER_INFO="${server_address}|${workdir}"
             return 0
         fi
 
@@ -351,9 +404,9 @@ wait_for_server_address() {
     echo ""
     error "Server address not available within ${SERVER_READY_TIMEOUT} seconds"
 
-    # Try to show error logs
-    info "Checking vLLM error log..."
-    ssh "${SSH_HOST}" "cat ${tmpdir}/vllm.err 2>/dev/null" || echo "Could not read error log"
+    # Try to show error logs from SLURM output
+    info "Checking SLURM output file..."
+    ssh "${SSH_HOST}" "cat ${slurm_out} 2>/dev/null" || echo "Could not read SLURM output"
 
     exit 1
 }
@@ -368,10 +421,19 @@ establish_tunnel() {
     local remote_port=$(echo "$server_address" | cut -d: -f2)
 
     info "Establishing SSH tunnel (local port ${LOCAL_PORT})..."
+    info "Tunnel: localhost:${LOCAL_PORT} -> ${node_name}:${remote_port} via ${SSH_JUMP_HOST}"
 
-    # Establish tunnel with automatic host key acceptance for new hosts
-    ssh -f -N -L "${LOCAL_PORT}:${node_name}:${remote_port}" \
-        -o StrictHostKeyChecking=accept-new \
+    # Test SSH connection first
+    info "Testing SSH connection to ${node_name}..."
+    if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "echo 'Connection test successful'" 2>/dev/null; then
+        error "Cannot establish SSH connection to ${node_name}"
+        error "Make sure the job is still running on this node"
+        exit 1
+    fi
+
+    # Establish tunnel in background (let shell background it, not SSH -f)
+    ssh -N -L "${LOCAL_PORT}:localhost:${remote_port}" \
+        -o StrictHostKeyChecking=no \
         -o ExitOnForwardFailure=yes \
         -J "${SSH_JUMP_HOST}" \
         "${SSH_USER}@${node_name}" &
@@ -387,11 +449,15 @@ establish_tunnel() {
         exit 1
     fi
 
+    success "SSH tunnel established successfully (PID: ${SSH_TUNNEL_PID})"
+
     # Test connection
     info "Testing connection to vLLM server..."
+    info "Model loading typically takes 2-5 minutes for large models..."
+    info "(Connection attempts shown below are normal while the model loads)"
 
     local retries=0
-    local max_retries=10
+    local max_retries=150  # 150 retries × 2s = 5 minutes
 
     while [[ $retries -lt $max_retries ]]; do
         if curl -s --max-time "${CONNECTION_TEST_TIMEOUT}" "http://localhost:${LOCAL_PORT}/v1/models" >/dev/null 2>&1; then
@@ -407,8 +473,12 @@ establish_tunnel() {
             return 0
         fi
 
-        local ts=$(timestamp)
-        echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (attempt ${retries}/${max_retries})    "
+        # Show progress every 5th attempt (every 10 seconds) to reduce noise
+        if (( retries % 5 == 0 )); then
+            local ts=$(timestamp)
+            local elapsed=$((retries * 2))
+            echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (${elapsed}s elapsed)    "
+        fi
         retries=$((retries + 1))
         sleep 2
     done
@@ -423,20 +493,22 @@ establish_tunnel() {
 # ============================================================================
 
 stream_logs() {
-    local tmpdir=$1
+    local workdir=$1
     local node_name=$2
 
-    info "Streaming logs (Ctrl+C to stop and cleanup)..."
+    info "Streaming logs from SLURM output (Ctrl+C to stop and cleanup)..."
     echo ""
 
-    # Stream logs in background
+    local slurm_out="${workdir}/slurm-${JOB_ID}.out"
+
+    # Stream SLURM output in background
     (
-        ssh "${SSH_HOST}" "tail -f ${tmpdir}/vllm.out ${tmpdir}/vllm.err 2>/dev/null" | while IFS= read -r line; do
+        ssh "${SSH_HOST}" "tail -f ${slurm_out} 2>/dev/null" | while IFS= read -r line; do
             # Simple heuristic: if line contains ERROR, WARNING, or comes from stderr pattern, color it red
             if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
-                echo -e "${RED}[VLLM]${NC} $line"
+                echo -e "${RED}[LOG]${NC} $line"
             else
-                echo -e "${GREEN}[VLLM]${NC} $line"
+                echo -e "${GREEN}[LOG]${NC} $line"
             fi
         done
     ) &
@@ -518,15 +590,13 @@ main() {
     submit_job "$model_name" "$job_duration"
 
     # Wait for job to start
-    local node_name
-    node_name=$(wait_for_job_start)
+    wait_for_job_start
     echo ""
 
     # Wait for server to be ready
-    local server_info
-    server_info=$(wait_for_server_address "$node_name")
-    local server_address=$(echo "$server_info" | cut -d'|' -f1)
-    local tmpdir=$(echo "$server_info" | cut -d'|' -f2)
+    wait_for_server_address "$NODE_NAME"
+    local server_address=$(echo "$SERVER_INFO" | cut -d'|' -f1)
+    local tmpdir=$(echo "$SERVER_INFO" | cut -d'|' -f2)
     echo ""
 
     # Parse server address
@@ -537,10 +607,10 @@ main() {
     echo ""
 
     # Save session information
-    save_session "$model_name" "$node_name" "$remote_port" "$tmpdir"
+    save_session "$model_name" "$NODE_NAME" "$remote_port" "$tmpdir"
 
     # Stream logs (blocks until Ctrl+C)
-    stream_logs "$tmpdir" "$node_name"
+    stream_logs "$tmpdir" "$NODE_NAME"
 }
 
 # Run main function
