@@ -29,6 +29,7 @@ SSH_TUNNEL_PID=""
 LOG_STREAM_PID=""
 NODE_NAME=""
 SERVER_INFO=""
+CLEANUP_DONE=false
 
 # Color codes
 RED='\033[0;31m'
@@ -63,6 +64,12 @@ warning() {
 
 # Cleanup function - called on exit
 cleanup() {
+    # Prevent cleanup from running multiple times
+    if [[ "${CLEANUP_DONE}" == "true" ]]; then
+        return 0
+    fi
+    CLEANUP_DONE=true
+
     local exit_code=$?
 
     echo ""
