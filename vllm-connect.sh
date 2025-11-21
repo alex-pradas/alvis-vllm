@@ -29,6 +29,8 @@ SSH_TUNNEL_PID=""
 LOG_STREAM_PID=""
 NODE_NAME=""
 SERVER_INFO=""
+MODEL_CATALOG=""
+MODEL_NUMBER_MAP_FILE=""
 CLEANUP_DONE=false
 
 # Color codes
@@ -93,6 +95,16 @@ cleanup() {
         success "Cleaned up job ${JOB_ID}"
     fi
 
+    # Clean up model catalog temp file
+    if [[ -n "${MODEL_CATALOG}" && -f "${MODEL_CATALOG}" ]]; then
+        rm -f "${MODEL_CATALOG}" 2>/dev/null || true
+    fi
+
+    # Clean up model number mapping temp file
+    if [[ -n "${MODEL_NUMBER_MAP_FILE}" && -f "${MODEL_NUMBER_MAP_FILE}" ]]; then
+        rm -f "${MODEL_NUMBER_MAP_FILE}" 2>/dev/null || true
+    fi
+
     exit "${exit_code}"
 }
 
@@ -151,29 +163,87 @@ Automate vLLM server connection on Alvis cluster.
 
 OPTIONS:
   -m, --model MODEL_NAME    Model to use (default: gpt-oss-20b)
+  -i, --interactive         Interactive model selection menu
   -t, --time DURATION       Job duration in HH:MM:SS format (default: 1:00:00)
   -h, --help               Show this help message
-  --list-models            List available models from models.json
+  --list-models            List available models (auto-discovered + configured)
 
 EXAMPLES:
   $(basename "$0")                          # Use defaults
+  $(basename "$0") -i                       # Interactive model selection
   $(basename "$0") -m gpt-oss-20b -t 2:00:00  # Custom model and time
   $(basename "$0") --list-models            # Show available models
+
+NOTE:
+  Models are auto-discovered from /mimer/NOBACKUP/Datasets/LLM/huggingface/hub/
+  Use models.json to override defaults (max_model_len, descriptions)
 
 EOF
 }
 
+# Format models in grouped, compact display
+# Returns: formatted output and stores mapping in temp file
+format_models_grouped() {
+    local catalog=$1
+
+    # Create temp file for number-to-model mapping
+    MODEL_NUMBER_MAP_FILE=$(mktemp)
+
+    # Get all models sorted by org, then by name
+    local models_json=$(jq -r '
+        to_entries
+        | map(select(.key | startswith("_") | not))
+        | sort_by(.key)
+        | .[]
+        | "\(.key)|\(.value.max_model_len)"
+    ' "$catalog")
+
+    local counter=1
+    local current_org=""
+
+    while IFS='|' read -r full_model max_len; do
+        [[ -z "$full_model" ]] && continue
+
+        local org=$(echo "$full_model" | cut -d'/' -f1)
+        local name=$(echo "$full_model" | cut -d'/' -f2-)
+
+        # Print org header when it changes
+        if [[ "$org" != "$current_org" ]]; then
+            echo ""
+            echo -e "${GREEN}${org}:${NC}"
+            current_org="$org"
+        fi
+
+        # Print model entry
+        printf "  %2d. %-50s ${BLUE}(max: %s)${NC}\n" "$counter" "$name" "$max_len"
+
+        # Store mapping in temp file
+        echo "${counter}|${full_model}" >> "$MODEL_NUMBER_MAP_FILE"
+
+        ((counter++))
+    done <<< "$models_json"
+
+    echo ""
+}
+
+# Get model name by number from mapping file
+get_model_by_number() {
+    local number=$1
+    grep "^${number}|" "$MODEL_NUMBER_MAP_FILE" | cut -d'|' -f2
+}
+
 # List available models
 list_models() {
+    local catalog=$1
+
     info "Available models:"
-    echo ""
 
     if ! command -v jq &> /dev/null; then
         error "jq is required but not installed"
         exit 1
     fi
 
-    jq -r 'to_entries[] | "  \u001b[32m\(.key)\u001b[0m\n    Path: \(.value.path)\n    Max Length: \(.value.max_model_len)\n    Description: \(.value.description // "N/A")\n"' "$MODELS_JSON"
+    format_models_grouped "$catalog"
 }
 
 # ============================================================================
@@ -182,6 +252,7 @@ list_models() {
 
 preflight_checks() {
     local model_name=$1
+    local catalog=$2
 
     info "Running pre-flight checks..."
 
@@ -198,27 +269,22 @@ preflight_checks() {
     fi
 
     # Check if required files exist
-    if [[ ! -f "${MODELS_JSON}" ]]; then
-        error "models.json not found at: ${MODELS_JSON}"
-        exit 1
-    fi
-
     if [[ ! -f "${JOBSCRIPT_TEMPLATE}" ]]; then
         error "jobscript.sh not found at: ${JOBSCRIPT_TEMPLATE}"
         exit 1
     fi
 
-    # Validate JSON syntax
-    if ! jq empty "${MODELS_JSON}" 2>/dev/null; then
-        error "models.json contains invalid JSON"
+    # Validate catalog
+    if ! jq empty "$catalog" 2>/dev/null; then
+        error "Model catalog contains invalid JSON"
         exit 1
     fi
 
     # Check if model exists in catalog
-    if ! jq -e --arg model "$model_name" '.[$model]' "${MODELS_JSON}" &>/dev/null; then
-        error "Model '${model_name}' not found in models.json"
+    if ! jq -e --arg model "$model_name" '.[$model]' "$catalog" &>/dev/null; then
+        error "Model '${model_name}' not found in catalog"
         echo ""
-        list_models
+        list_models "$catalog"
         exit 1
     fi
 
@@ -243,11 +309,160 @@ preflight_checks() {
 # Model Configuration
 # ============================================================================
 
+# Discover available models from Alvis HuggingFace cache
+discover_models_from_alvis() {
+    local hub_path="/mimer/NOBACKUP/Datasets/LLM/huggingface/hub"
+
+    # SSH to Alvis and discover models
+    local discovery_script='
+        hub_path="$1"
+
+        # Find all model directories (models--org--name format)
+        find "$hub_path" -maxdepth 1 -type d -name "models--*--*" 2>/dev/null | while read -r model_dir; do
+            model_base=$(basename "$model_dir")
+
+            # Parse model name: models--org--name → org/name
+            org_name=$(echo "$model_base" | sed "s/^models--//; s/--/\//")
+
+            # Find latest snapshot by modification time
+            latest_snapshot=$(find "$model_dir/snapshots" -maxdepth 1 -type d 2>/dev/null | \
+                grep -v "^$model_dir/snapshots$" | \
+                xargs -I {} stat -c "%Y {}" {} 2>/dev/null | \
+                sort -rn | head -1 | cut -d" " -f2-)
+
+            if [[ -n "$latest_snapshot" ]]; then
+                # Get snapshot hash from path
+                snapshot_hash=$(basename "$latest_snapshot")
+
+                # Calculate approximate model size for default max_model_len
+                model_size=$(du -sb "$latest_snapshot" 2>/dev/null | cut -f1)
+
+                # Output: model_name|full_path|snapshot_hash|size_bytes
+                echo "${org_name}|${latest_snapshot}|${snapshot_hash}|${model_size}"
+            fi
+        done
+    '
+
+    # Execute discovery on Alvis
+    ssh -o ConnectTimeout=30 "${SSH_HOST}" "bash -s" "$hub_path" <<< "$discovery_script" 2>/dev/null
+}
+
+# Get intelligent default max_model_len based on model name/size
+get_default_max_model_len() {
+    local model_name=$1
+    local model_size=$2
+
+    # Extract number from model name (e.g., "7b", "13b", "70b")
+    if [[ "$model_name" =~ ([0-9]+)b ]]; then
+        local param_count="${BASH_REMATCH[1]}"
+
+        # Default context lengths based on parameter count
+        case "$param_count" in
+            [1-7])   echo "4096" ;;
+            [8-13])  echo "8192" ;;
+            [14-20]) echo "10000" ;;
+            [21-34]) echo "16384" ;;
+            *)       echo "32768" ;;
+        esac
+    else
+        # Default fallback
+        echo "8192"
+    fi
+}
+
+# Build merged model catalog (discovered + configured)
+build_model_catalog() {
+    local temp_catalog=$(mktemp)
+
+    # Start with empty catalog
+    echo "{}" > "$temp_catalog"
+
+    # Discover models from Alvis
+    info "Discovering models from Alvis..." >&2
+    local discovered=$(discover_models_from_alvis)
+
+    if [[ -z "$discovered" ]]; then
+        warning "No models discovered from Alvis, using models.json only" >&2
+        cat "${MODELS_JSON}" > "$temp_catalog"
+        echo "$temp_catalog"
+        return 0
+    fi
+
+    # Process discovered models
+    while IFS='|' read -r model_name model_path snapshot_hash model_size; do
+        [[ -z "$model_name" ]] && continue
+
+        # Generate default max_model_len
+        local default_max_len=$(get_default_max_model_len "$model_name" "$model_size")
+
+        # Check if model exists in models.json (for overrides)
+        local override_path=$(jq -r --arg model "$model_name" '.[$model].path // empty' "${MODELS_JSON}" 2>/dev/null)
+        local override_max_len=$(jq -r --arg model "$model_name" '.[$model].max_model_len // empty' "${MODELS_JSON}" 2>/dev/null)
+        local override_desc=$(jq -r --arg model "$model_name" '.[$model].description // empty' "${MODELS_JSON}" 2>/dev/null)
+
+        # Use override values if they exist, otherwise use discovered values
+        local final_path="${override_path:-$model_path}"
+        local final_max_len="${override_max_len:-$default_max_len}"
+        local final_desc="${override_desc:-Auto-discovered from Alvis (snapshot: ${snapshot_hash:0:8})}"
+
+        # Add to catalog
+        jq --arg model "$model_name" \
+           --arg path "$final_path" \
+           --arg max_len "$final_max_len" \
+           --arg desc "$final_desc" \
+           '.[$model] = {path: $path, max_model_len: ($max_len | tonumber), description: $desc}' \
+           "$temp_catalog" > "${temp_catalog}.tmp" && mv "${temp_catalog}.tmp" "$temp_catalog"
+    done <<< "$discovered"
+
+    # Add any models.json entries that weren't discovered (manual additions)
+    if [[ -f "${MODELS_JSON}" ]]; then
+        jq -s '.[0] * .[1]' "$temp_catalog" "${MODELS_JSON}" > "${temp_catalog}.tmp" && \
+            mv "${temp_catalog}.tmp" "$temp_catalog"
+    fi
+
+    echo "$temp_catalog"
+}
+
 get_model_config() {
     local model_name=$1
     local field=$2
+    local catalog=$3
 
-    jq -r --arg model "$model_name" --arg field "$field" '.[$model][$field]' "${MODELS_JSON}"
+    jq -r --arg model "$model_name" --arg field "$field" '.[$model][$field]' "$catalog"
+}
+
+# Interactive model selection
+select_model_interactive() {
+    local catalog=$1
+
+    echo ""
+    info "Available models:"
+
+    # Display models using grouped format
+    format_models_grouped "$catalog"
+
+    # Get total number of models from mapping file
+    local total_models=$(wc -l < "$MODEL_NUMBER_MAP_FILE" | tr -d ' ')
+
+    if [[ $total_models -eq 0 ]]; then
+        error "No models available"
+        return 1
+    fi
+
+    # Prompt for selection
+    local selection
+    while true; do
+        read -p "Select model (1-${total_models}): " selection
+
+        # Validate input
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le "$total_models" ]]; then
+            local selected_model=$(get_model_by_number "$selection")
+            echo "$selected_model"
+            return 0
+        else
+            error "Invalid selection. Please enter a number between 1 and ${total_models}"
+        fi
+    done
 }
 
 # ============================================================================
@@ -257,11 +472,12 @@ get_model_config() {
 submit_job() {
     local model_name=$1
     local job_duration=$2
+    local catalog=$3
 
     info "Loading model configuration for: ${model_name}"
 
-    local model_path=$(get_model_config "$model_name" "path")
-    local max_model_len=$(get_model_config "$model_name" "max_model_len")
+    local model_path=$(get_model_config "$model_name" "path" "$catalog")
+    local max_model_len=$(get_model_config "$model_name" "max_model_len" "$catalog")
 
     info "Model path: ${model_path}"
     info "Max model length: ${max_model_len}"
@@ -624,6 +840,7 @@ main() {
     # Default values
     local model_name="gpt-oss-20b"
     local job_duration="1:00:00"
+    local interactive_mode=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -631,6 +848,10 @@ main() {
             -m|--model)
                 model_name="$2"
                 shift 2
+                ;;
+            -i|--interactive)
+                interactive_mode=true
+                shift
                 ;;
             -t|--time)
                 job_duration="$2"
@@ -641,7 +862,10 @@ main() {
                 exit 0
                 ;;
             --list-models)
-                list_models
+                # Build catalog first for listing
+                local temp_catalog=$(build_model_catalog)
+                list_models "$temp_catalog"
+                rm -f "$temp_catalog"
                 exit 0
                 ;;
             *)
@@ -657,11 +881,27 @@ main() {
     info "================================"
     echo ""
 
+    # Build model catalog (auto-discover + configured)
+    MODEL_CATALOG=$(build_model_catalog)
+    success "Model catalog built successfully"
+    echo ""
+
+    # Handle interactive model selection
+    if [[ "$interactive_mode" == "true" ]]; then
+        model_name=$(select_model_interactive "$MODEL_CATALOG")
+        if [[ -z "$model_name" ]]; then
+            error "Model selection cancelled"
+            exit 1
+        fi
+        info "Selected model: ${model_name}"
+        echo ""
+    fi
+
     # Run pre-flight checks
-    preflight_checks "$model_name"
+    preflight_checks "$model_name" "$MODEL_CATALOG"
 
     # Submit job
-    submit_job "$model_name" "$job_duration"
+    submit_job "$model_name" "$job_duration" "$MODEL_CATALOG"
 
     # Wait for job to start
     wait_for_job_start

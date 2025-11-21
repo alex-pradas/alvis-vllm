@@ -1,4 +1,11 @@
 {
+  "_comment": "This file is used for OVERRIDES ONLY. Models are auto-discovered from /mimer/NOBACKUP/Datasets/LLM/huggingface/hub/",
+  "_info": {
+    "auto_discovery": "Models are automatically discovered from the Alvis HuggingFace cache",
+    "override_usage": "Add entries here to override auto-discovered values (path, max_model_len, description)",
+    "format": "Model names should match the HuggingFace format: org/model-name",
+    "example": "gpt-oss-20b entry below shows how to override discovered values"
+  },
   "gpt-oss-20b": {
     "path": "/mimer/NOBACKUP/Datasets/LLM/huggingface/hub/models--openai--gpt-oss-20b/snapshots/cbf31f62664d4b1360b3a78427f7b3c3ed8f0fa8/",
     "max_model_len": 10000,
