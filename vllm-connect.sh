@@ -298,7 +298,8 @@ wait_for_job_start() {
             return 0
         fi
 
-        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for job to start (state: ${job_state})... (${elapsed}s/${JOB_START_TIMEOUT}s)"
+        local ts=$(timestamp)
+        echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for job to start (state: ${job_state})... (${elapsed}s/${JOB_START_TIMEOUT}s)    "
         sleep 5
         elapsed=$((elapsed + 5))
     done
@@ -341,7 +342,8 @@ wait_for_server_address() {
             return 0
         fi
 
-        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for server address... (${elapsed}s/${SERVER_READY_TIMEOUT}s)"
+        local ts=$(timestamp)
+        echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for server address... (${elapsed}s/${SERVER_READY_TIMEOUT}s)    "
         sleep 5
         elapsed=$((elapsed + 5))
     done
@@ -405,7 +407,8 @@ establish_tunnel() {
             return 0
         fi
 
-        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (attempt ${retries}/${max_retries})"
+        local ts=$(timestamp)
+        echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (attempt ${retries}/${max_retries})    "
         retries=$((retries + 1))
         sleep 2
     done
