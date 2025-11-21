@@ -28,16 +28,18 @@ apptainer exec ${SIF_IMAGE} vllm serve ${HF_MODEL} \
    --port ${API_PORT} ${vllm_opts} \
    --served-model-name $MODEL_NAME &
 VLLM_PID=$!
-sleep 20
 
-# wait at most 10 min for the model to start, otherwise abort
-if timeout 600 bash -c "tail -f vllm.err | grep -q 'Application startup complete'"; then
-    echo "vLLM server started successfully"
-    echo "========================================================================"
-    echo "vLLM server is running. Waiting for job to complete..."
-    wait $VLLM_PID
-else
-    echo "vLLM doesn't seem to start, aborting"
-    kill $VLLM_PID 2>/dev/null
-    exit 1
-fi
+echo "========================================================================"
+echo "vLLM server is running. Waiting for job to complete..."
+echo "The connection script will validate that the API is responding."
+echo "========================================================================"
+
+# Wait for vLLM process to complete or until job time limit
+wait $VLLM_PID
+vllm_exit_code=$?
+
+echo "========================================================================"
+echo "vLLM server exited with code: $vllm_exit_code"
+echo "========================================================================"
+
+exit $vllm_exit_code
