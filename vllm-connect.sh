@@ -362,6 +362,56 @@ wait_for_job_start() {
 }
 
 # ============================================================================
+# vLLM Log Streaming (Early Start)
+# ============================================================================
+
+start_vllm_streaming() {
+    local node_name=$1
+
+    info "Starting vLLM output streaming..."
+
+    # Get the SLURM work directory (TMPDIR for the job)
+    local workdir
+    workdir=$(run_with_timeout 15 ssh -o ConnectTimeout=10 "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%Z'" 2>/dev/null || echo "")
+
+    if [[ -z "$workdir" ]]; then
+        warning "Could not determine work directory, will retry later"
+        return 1
+    fi
+
+    local vllm_out="${workdir}/vllm.out"
+    local vllm_err="${workdir}/vllm.err"
+
+    info "Streaming from: ${workdir}"
+    echo ""
+
+    # Stream both vllm.out and vllm.err via SSH to compute node
+    # We use tail -f with -n +1 to show all lines from the beginning
+    (
+        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "
+            # Wait for files to be created (up to 30 seconds)
+            for i in {1..30}; do
+                if [[ -f '${vllm_out}' || -f '${vllm_err}' ]]; then
+                    break
+                fi
+                sleep 1
+            done
+
+            # Stream both files, prefixing each line with [vLLM]
+            tail -f '${vllm_out}' '${vllm_err}' 2>/dev/null | while IFS= read -r line; do
+                echo -e '${BLUE}[vLLM]${NC}' \"\$line\"
+            done
+        " 2>/dev/null
+    ) &
+
+    LOG_STREAM_PID=$!
+    success "vLLM output streaming started (PID: ${LOG_STREAM_PID})"
+    echo ""
+
+    return 0
+}
+
+# ============================================================================
 # Server Ready Detection
 # ============================================================================
 
@@ -390,8 +440,7 @@ wait_for_server_address() {
 
         if [[ -n "$server_address" ]]; then
             echo ""
-            success "vLLM is launching on ${server_address}"
-            info "Server is loading the model, this may take a few minutes..."
+            success "Detected vLLM server address: ${server_address}"
             SERVER_INFO="${server_address}|${workdir}"
             return 0
         fi
@@ -453,9 +502,8 @@ establish_tunnel() {
     success "SSH tunnel established successfully (PID: ${SSH_TUNNEL_PID})"
 
     # Test connection
-    info "Testing connection to vLLM server..."
-    info "Model loading typically takes 2-5 minutes for large models..."
-    info "(Connection attempts shown below are normal while the model loads)"
+    info "Waiting for vLLM model to load and API to become available..."
+    info "(This typically takes 2-5 minutes for large models)"
 
     local retries=0
     local max_retries=150  # 150 retries × 2s = 5 minutes
@@ -463,13 +511,22 @@ establish_tunnel() {
     while [[ $retries -lt $max_retries ]]; do
         if curl -s --max-time "${CONNECTION_TEST_TIMEOUT}" "http://localhost:${LOCAL_PORT}/v1/models" >/dev/null 2>&1; then
             echo ""
-            success "vLLM server is ready!"
-            success "Connection successful at http://localhost:${LOCAL_PORT}"
             echo ""
-            info "API Endpoints:"
-            info "  - Models:      http://localhost:${LOCAL_PORT}/v1/models"
-            info "  - Completions: http://localhost:${LOCAL_PORT}/v1/completions"
-            info "  - Chat:        http://localhost:${LOCAL_PORT}/v1/chat/completions"
+            echo "════════════════════════════════════════════════════════════════"
+            success "✓ vLLM server is ready and accepting connections!"
+            echo "════════════════════════════════════════════════════════════════"
+            echo ""
+            info "API endpoint: http://localhost:${LOCAL_PORT}"
+            echo ""
+            info "Available endpoints:"
+            info "  • Models:      http://localhost:${LOCAL_PORT}/v1/models"
+            info "  • Completions: http://localhost:${LOCAL_PORT}/v1/completions"
+            info "  • Chat:        http://localhost:${LOCAL_PORT}/v1/chat/completions"
+            echo ""
+            echo "════════════════════════════════════════════════════════════════"
+            info "vLLM output will continue streaming below"
+            info "Press Ctrl+C to stop and cleanup"
+            echo "════════════════════════════════════════════════════════════════"
             echo ""
             return 0
         fi
@@ -478,7 +535,7 @@ establish_tunnel() {
         if (( retries % 5 == 0 )); then
             local ts=$(timestamp)
             local elapsed=$((retries * 2))
-            echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM to respond... (${elapsed}s elapsed)    "
+            echo -ne "\r${BLUE}[${ts}]${NC} ${BLUE}[INFO]${NC} Waiting for vLLM API to respond... (${elapsed}s elapsed)    "
         fi
         retries=$((retries + 1))
         sleep 2
@@ -489,77 +546,6 @@ establish_tunnel() {
     exit 1
 }
 
-# ============================================================================
-# Log Streaming
-# ============================================================================
-
-stream_logs() {
-    local workdir=$1
-    local node_name=$2
-
-    info "Streaming vLLM logs from compute node (Ctrl+C to stop and cleanup)..."
-    echo ""
-
-    # Find the vLLM log file by looking for it in the job's process environment
-    info "Locating vLLM log files on ${node_name}..."
-    local vllm_log
-    vllm_log=$(ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "
-        # Get TMPDIR from a running vLLM process
-        for pid in \$(pgrep -u ${SSH_USER} -f 'vllm serve' 2>/dev/null); do
-            tmpdir=\$(cat /proc/\$pid/environ 2>/dev/null | tr '\\0' '\\n' | grep '^TMPDIR=' | cut -d= -f2)
-            if [[ -n \"\$tmpdir\" && -f \"\$tmpdir/vllm.err\" ]]; then
-                echo \"\$tmpdir/vllm.err\"
-                exit 0
-            fi
-        done
-        # Fallback: check common SLURM TMPDIR patterns
-        for base in /scratch/local /local /tmp; do
-            candidate=\"\$base/${JOB_ID}/vllm.err\"
-            if [[ -f \"\$candidate\" ]]; then
-                echo \"\$candidate\"
-                exit 0
-            fi
-        done
-        echo \"\"
-    " 2>/dev/null)
-
-    if [[ -z "$vllm_log" ]]; then
-        warning "Could not locate vllm.err, falling back to SLURM output"
-        local slurm_out="${workdir}/slurm-${JOB_ID}.out"
-        info "Streaming from: ${slurm_out}"
-        echo ""
-
-        # Stream SLURM output from login node
-        (
-            ssh "${SSH_HOST}" "tail -f ${slurm_out} 2>/dev/null" | while IFS= read -r line; do
-                if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
-                    echo -e "${RED}[SLURM]${NC} $line"
-                else
-                    echo -e "${GREEN}[SLURM]${NC} $line"
-                fi
-            done
-        ) &
-    else
-        info "Streaming from: ${vllm_log}"
-        echo ""
-
-        # Stream vLLM error log via SSH to compute node
-        (
-            ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "tail -f ${vllm_log} 2>/dev/null" | while IFS= read -r line; do
-                if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
-                    echo -e "${RED}[VLLM]${NC} $line"
-                else
-                    echo -e "${GREEN}[VLLM]${NC} $line"
-                fi
-            done
-        ) &
-    fi
-
-    LOG_STREAM_PID=$!
-
-    # Wait for log streaming process
-    wait "${LOG_STREAM_PID}"
-}
 
 # ============================================================================
 # Session Persistence
@@ -635,7 +621,10 @@ main() {
     wait_for_job_start
     echo ""
 
-    # Wait for server to be ready
+    # Start streaming vLLM output immediately
+    start_vllm_streaming "$NODE_NAME"
+
+    # Wait for server to be ready (while streaming continues in background)
     wait_for_server_address "$NODE_NAME"
     local server_address=$(echo "$SERVER_INFO" | cut -d'|' -f1)
     local tmpdir=$(echo "$SERVER_INFO" | cut -d'|' -f2)
@@ -644,15 +633,25 @@ main() {
     # Parse server address
     local remote_port=$(echo "$server_address" | cut -d: -f2)
 
-    # Establish SSH tunnel
+    # Establish SSH tunnel (while streaming continues in background)
     establish_tunnel "$server_address"
     echo ""
 
     # Save session information
     save_session "$model_name" "$NODE_NAME" "$remote_port" "$tmpdir"
 
-    # Stream logs (blocks until Ctrl+C)
-    stream_logs "$tmpdir" "$NODE_NAME"
+    # Keep streaming until user cancels (Ctrl+C)
+    if [[ -n "${LOG_STREAM_PID}" ]] && kill -0 "${LOG_STREAM_PID}" 2>/dev/null; then
+        wait "${LOG_STREAM_PID}"
+    else
+        warning "Log streaming process not running"
+        info "You can still use the API at http://localhost:${LOCAL_PORT}"
+        info "Press Ctrl+C to cleanup and exit"
+        # Keep the script running until user cancels
+        while true; do
+            sleep 1
+        done
+    fi
 }
 
 # Run main function
