@@ -1,0 +1,7 @@
+{
+  "gpt-oss-20b": {
+    "path": "/mimer/NOBACKUP/Datasets/LLM/huggingface/hub/models--openai--gpt-oss-20b/snapshots/cbf31f62664d4b1360b3a78427f7b3c3ed8f0fa8/",
+    "max_model_len": 10000,
+    "description": "GPT OSS 20B model"
+  }
+}
