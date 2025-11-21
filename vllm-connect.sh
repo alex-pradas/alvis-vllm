@@ -39,20 +39,24 @@ NC='\033[0m' # No Color
 # Helper Functions
 # ============================================================================
 
+timestamp() {
+    date +"%H:%M:%S"
+}
+
 info() {
-    echo -e "${BLUE}[INFO]${NC} $*"
+    echo -e "${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} $*"
 }
 
 success() {
-    echo -e "${GREEN}✓${NC} $*"
+    echo -e "${BLUE}[$(timestamp)]${NC} ${GREEN}✓${NC} $*"
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $*" >&2
+    echo -e "${BLUE}[$(timestamp)]${NC} ${RED}[ERROR]${NC} $*" >&2
 }
 
 warning() {
-    echo -e "${YELLOW}[WARN]${NC} $*"
+    echo -e "${BLUE}[$(timestamp)]${NC} ${YELLOW}[WARN]${NC} $*"
 }
 
 # Cleanup function - called on exit
@@ -285,7 +289,7 @@ wait_for_job_start() {
             return 0
         fi
 
-        printf "\r${BLUE}[INFO]${NC} Waiting for job to start... (${elapsed}s/${JOB_START_TIMEOUT}s)"
+        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for job to start... (${elapsed}s/${JOB_START_TIMEOUT}s)"
         sleep 5
         elapsed=$((elapsed + 5))
     done
@@ -326,7 +330,7 @@ wait_for_server_address() {
             return 0
         fi
 
-        printf "\r${BLUE}[INFO]${NC} Waiting for server address... (${elapsed}s/${SERVER_READY_TIMEOUT}s)"
+        printf "\r${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} Waiting for server address... (${elapsed}s/${SERVER_READY_TIMEOUT}s)"
         sleep 5
         elapsed=$((elapsed + 5))
     done
