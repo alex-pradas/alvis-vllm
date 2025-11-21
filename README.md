@@ -2,6 +2,14 @@
 
 Automate the process of connecting to Chalmers Alvis AI supercompute cluster, requesting compute resources, launching a vLLM server, and establishing an SSH tunnel to access it locally.
 
+## ✨ What's New in v0.2.0
+
+- 🤖 **Automatic Model Discovery** - Finds 40+ models from Alvis HuggingFace cache automatically
+- 🎯 **Interactive Selection** - User-friendly menu with `-i/--interactive` flag
+- 📊 **Grouped Model Listing** - Clean, color-coded display organized by provider
+- ⚙️ **Smart Defaults** - Intelligent `max_model_len` based on model size
+- 🎨 **Improved UI** - Compact format with continuous numbering
+
 ## Quick Start
 
 ```bash
@@ -66,28 +74,75 @@ alias vllm-connect='~/alvis-vllm/vllm-connect.sh'
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-m, --model MODEL_NAME` | Model to use | `gpt-oss-20b` |
+| `-i, --interactive` | Interactive model selection menu | - |
 | `-t, --time DURATION` | Job duration (HH:MM:SS) | `1:00:00` |
 | `-h, --help` | Show help message | - |
-| `--list-models` | List available models | - |
+| `--list-models` | List available models (auto-discovered) | - |
 
-## Adding New Models
+### Interactive Model Selection
 
-Edit [models.json](models.json) to add new models:
+Use the `-i` flag to browse models in a user-friendly menu:
+
+```bash
+./vllm-connect.sh -i
+```
+
+You'll see models grouped by provider with continuous numbering:
+
+```
+HuggingFaceTB:
+   1. SmolLM2-135M (max: 8192)
+   2. SmolLM2-135M-Instruct (max: 8192)
+
+Qwen:
+   6. Qwen2-0.5B (max: 8192)
+   7. Qwen2.5-0.5B-Instruct (max: 8192)
+
+unsloth:
+  24. Llama-3.2-1B-Instruct (max: 8192)
+  25. Llama-3.2-3B-Instruct (max: 8192)
+  ...
+
+Select model (1-40):
+```
+
+## Model Configuration
+
+### Automatic Discovery
+
+Models are automatically discovered from `/mimer/NOBACKUP/Datasets/LLM/huggingface/hub/` on Alvis. The script:
+- Scans for all available models in HuggingFace cache format
+- Selects the latest snapshot for each model
+- Applies intelligent default `max_model_len` based on model size:
+
+| Model Size | Default max_model_len |
+|------------|----------------------|
+| 1B-7B      | 4096                 |
+| 8B-13B     | 8192                 |
+| 14B-20B    | 10000                |
+| 21B-34B    | 16384                |
+| 35B+       | 32768                |
+
+### Manual Overrides
+
+The [models.json](models.json) file is now used for **overrides only**. Edit it to customize specific models:
 
 ```json
 {
-  "model-name": {
-    "path": "/path/to/model/on/alvis",
-    "max_model_len": 8192,
-    "description": "Model description"
+  "_comment": "This file is used for OVERRIDES ONLY",
+  "org/model-name": {
+    "path": "/custom/path/to/model",
+    "max_model_len": 10000,
+    "description": "Custom description"
   }
 }
 ```
 
-**Fields:**
-- `path`: Full path to the model on Alvis filesystem
-- `max_model_len`: Maximum context length for the model
-- `description`: Human-readable description (optional)
+**Use cases:**
+- Override auto-discovered `max_model_len`
+- Specify custom model paths
+- Add descriptive names
+- Configure models not in the cache
 
 ## Example Output
 
@@ -228,13 +283,30 @@ MODEL=gpt-oss-20b
 STARTED=2024-11-21T10:30:00
 ```
 
+## Version History
+
+### v0.2.0 (Current)
+- ✅ Automatic model discovery from Alvis HuggingFace cache
+- ✅ Interactive model selection menu with `-i` flag
+- ✅ Grouped, color-coded model listing by provider
+- ✅ Intelligent default `max_model_len` based on model size
+- ✅ Hybrid configuration (models.json for overrides only)
+- ✅ Bash 3.2 compatibility
+
+### v0.1.0
+- ✅ Basic vLLM connection automation
+- ✅ Real-time output streaming with timestamps
+- ✅ Automatic SSH tunneling
+- ✅ SLURM job management
+- ✅ Manual model configuration
+
 ## Future Enhancements
 
-- [ ] Automatic model discovery by scanning Alvis filesystem
 - [ ] Session recovery (reconnect to existing jobs)
 - [ ] Multi-job management
 - [ ] Configuration file for defaults (~/.alvis-vllm.conf)
 - [ ] Support for multiple simultaneous connections
+- [ ] Model performance metrics and usage tracking
 
 ## License
 
