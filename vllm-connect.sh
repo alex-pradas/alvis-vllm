@@ -386,22 +386,27 @@ start_vllm_streaming() {
     echo ""
 
     # Stream both vllm.out and vllm.err via SSH to compute node
-    # We use tail -f with -n +1 to show all lines from the beginning
+    # We use tail -f to show all lines from the beginning
     (
-        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "
+        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" bash -s "${vllm_out}" "${vllm_err}" "${BLUE}" "${NC}" <<'REMOTE_SCRIPT'
+            vllm_out="$1"
+            vllm_err="$2"
+            BLUE="$3"
+            NC="$4"
+
             # Wait for files to be created (up to 30 seconds)
             for i in {1..30}; do
-                if [[ -f '${vllm_out}' || -f '${vllm_err}' ]]; then
+                if [[ -f "$vllm_out" || -f "$vllm_err" ]]; then
                     break
                 fi
                 sleep 1
             done
 
             # Stream both files, prefixing each line with [vLLM]
-            tail -f '${vllm_out}' '${vllm_err}' 2>/dev/null | while IFS= read -r line; do
-                echo -e '${BLUE}[vLLM]${NC}' \"\$line\"
+            tail -f "$vllm_out" "$vllm_err" 2>/dev/null | while IFS= read -r line; do
+                echo -e "${BLUE}[vLLM]${NC} $line"
             done
-        " 2>/dev/null
+REMOTE_SCRIPT
     ) &
 
     LOG_STREAM_PID=$!
