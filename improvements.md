@@ -5,6 +5,77 @@ This document tracks planned improvements and enhancements for the Alvis vLLM co
 
 ---
 
+## Priority 0: Immediate Improvements
+
+### Early Job Monitoring URL Display
+**Status**: ✅ Completed
+**Priority**: High
+**Effort**: Low
+
+**Description**:
+Display the job monitoring URL immediately when the job starts running, not later during log streaming.
+
+**Current Behavior**:
+```
+[20:46:52] [INFO] ✓ Job is running on node: alvis8-08
+...
+[Later during log streaming]
+[LOG] This job can be monitored from: https://job.c3se.chalmers.se/alvis/5385584
+```
+
+**Desired Behavior**:
+```
+[20:46:52] [INFO] ✓ Job is running on node: alvis8-08
+[20:46:52] [INFO] Monitor job at: https://job.c3se.chalmers.se/alvis/5385584
+```
+
+**Implementation Details**:
+- Add job URL display in `wait_for_job_start()` function immediately after job starts
+- Format: `https://job.c3se.chalmers.se/alvis/${JOB_ID}`
+- Show right after the "Job is running on node" message
+
+**Benefits**:
+- Users can monitor job status in web UI immediately
+- Better transparency and user experience
+- No need to wait for log streaming to start
+
+---
+
+### Stream vLLM Application Log
+**Status**: ✅ Completed
+**Priority**: High
+**Effort**: Medium
+
+**Description**:
+Stream the actual vLLM application log file (`vllm.log`) instead of the SLURM output file.
+
+**Current Behavior**:
+- Streams SLURM output file: `slurm-${JOB_ID}.out`
+- Contains job script output and basic vLLM startup messages
+
+**Desired Behavior**:
+- Stream vLLM application log: `${TMPDIR}/vllm.log`
+- Contains detailed vLLM server logs, request handling, and errors
+- More useful for debugging and monitoring vLLM server behavior
+
+**Implementation Details**:
+- Modify `stream_logs()` function to tail `${TMPDIR}/vllm.log`
+- Need to get TMPDIR location (already available from server info)
+- May need to wait for log file to be created
+- Consider streaming both files with prefixes: `[SLURM]` and `[VLLM]`
+
+**Challenges**:
+- TMPDIR is on compute node local storage, need SSH to access
+- Log file may not exist immediately after job starts
+- Need proper error handling if log file doesn't exist
+
+**Benefits**:
+- Better visibility into vLLM server operation
+- Easier debugging of model loading and request issues
+- Real-time monitoring of inference requests
+
+---
+
 ## Priority 1: Enhanced Job Monitoring
 
 ### Queue Position Display

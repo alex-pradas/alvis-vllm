@@ -50,7 +50,7 @@ info() {
 }
 
 success() {
-    echo -e "${BLUE}[$(timestamp)]${NC} ${GREEN}✓${NC} $*"
+    echo -e "${BLUE}[$(timestamp)]${NC} ${BLUE}[INFO]${NC} ${GREEN}✓${NC} $*"
 }
 
 error() {
@@ -343,6 +343,7 @@ wait_for_job_start() {
         if [[ "$job_state" == "RUNNING" ]]; then
             echo ""
             success "Job is running on node: ${node_name}"
+            info "Monitor job at: https://job.c3se.chalmers.se/alvis/${JOB_ID}"
             NODE_NAME="$node_name"
             return 0
         fi
@@ -496,22 +497,63 @@ stream_logs() {
     local workdir=$1
     local node_name=$2
 
-    info "Streaming logs from SLURM output (Ctrl+C to stop and cleanup)..."
+    info "Streaming vLLM logs from compute node (Ctrl+C to stop and cleanup)..."
     echo ""
 
-    local slurm_out="${workdir}/slurm-${JOB_ID}.out"
-
-    # Stream SLURM output in background
-    (
-        ssh "${SSH_HOST}" "tail -f ${slurm_out} 2>/dev/null" | while IFS= read -r line; do
-            # Simple heuristic: if line contains ERROR, WARNING, or comes from stderr pattern, color it red
-            if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
-                echo -e "${RED}[LOG]${NC} $line"
-            else
-                echo -e "${GREEN}[LOG]${NC} $line"
+    # Find the vLLM log file by looking for it in the job's process environment
+    info "Locating vLLM log files on ${node_name}..."
+    local vllm_log
+    vllm_log=$(ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "
+        # Get TMPDIR from a running vLLM process
+        for pid in \$(pgrep -u ${SSH_USER} -f 'vllm serve' 2>/dev/null); do
+            tmpdir=\$(cat /proc/\$pid/environ 2>/dev/null | tr '\\0' '\\n' | grep '^TMPDIR=' | cut -d= -f2)
+            if [[ -n \"\$tmpdir\" && -f \"\$tmpdir/vllm.err\" ]]; then
+                echo \"\$tmpdir/vllm.err\"
+                exit 0
             fi
         done
-    ) &
+        # Fallback: check common SLURM TMPDIR patterns
+        for base in /scratch/local /local /tmp; do
+            candidate=\"\$base/${JOB_ID}/vllm.err\"
+            if [[ -f \"\$candidate\" ]]; then
+                echo \"\$candidate\"
+                exit 0
+            fi
+        done
+        echo \"\"
+    " 2>/dev/null)
+
+    if [[ -z "$vllm_log" ]]; then
+        warning "Could not locate vllm.err, falling back to SLURM output"
+        local slurm_out="${workdir}/slurm-${JOB_ID}.out"
+        info "Streaming from: ${slurm_out}"
+        echo ""
+
+        # Stream SLURM output from login node
+        (
+            ssh "${SSH_HOST}" "tail -f ${slurm_out} 2>/dev/null" | while IFS= read -r line; do
+                if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
+                    echo -e "${RED}[SLURM]${NC} $line"
+                else
+                    echo -e "${GREEN}[SLURM]${NC} $line"
+                fi
+            done
+        ) &
+    else
+        info "Streaming from: ${vllm_log}"
+        echo ""
+
+        # Stream vLLM error log via SSH to compute node
+        (
+            ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "tail -f ${vllm_log} 2>/dev/null" | while IFS= read -r line; do
+                if [[ "$line" =~ ERROR|WARNING|Exception ]]; then
+                    echo -e "${RED}[VLLM]${NC} $line"
+                else
+                    echo -e "${GREEN}[VLLM]${NC} $line"
+                fi
+            done
+        ) &
+    fi
 
     LOG_STREAM_PID=$!
 
