@@ -377,19 +377,42 @@ start_vllm_streaming() {
 
     info "Starting vLLM output streaming..."
 
-    # Get the SLURM work directory (TMPDIR for the job)
-    local workdir
-    workdir=$(run_with_timeout 15 ssh -o ConnectTimeout=10 "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%Z'" 2>/dev/null || echo "")
+    # Get the submit directory to find SLURM output file
+    local submitdir
+    submitdir=$(run_with_timeout 15 ssh -o ConnectTimeout=10 "${SSH_HOST}" "squeue -j ${JOB_ID} -h -o '%Z'" 2>/dev/null || echo "")
 
-    if [[ -z "$workdir" ]]; then
-        warning "Could not determine work directory, will retry later"
+    if [[ -z "$submitdir" ]]; then
+        warning "Could not determine submit directory"
         return 1
     fi
 
-    local vllm_out="${workdir}/vllm.out"
-    local vllm_err="${workdir}/vllm.err"
+    local slurm_out="${submitdir}/slurm-${JOB_ID}.out"
 
-    info "Streaming from: ${workdir}"
+    # Extract the actual TMPDIR from the jobscript output
+    # The jobscript prints: "Output will be written to: ${TMPDIR}/vllm.out and ${TMPDIR}/vllm.err"
+    info "Detecting TMPDIR from job output..."
+    local tmpdir
+
+    # Wait up to 30 seconds for the TMPDIR line to appear
+    local wait_time=0
+    while [[ $wait_time -lt 30 ]]; do
+        tmpdir=$(ssh -o ConnectTimeout=10 "${SSH_HOST}" "grep -oP 'Output will be written to: \K[^/]+(?=/vllm)' ${slurm_out} 2>/dev/null | head -1" || echo "")
+        if [[ -n "$tmpdir" ]]; then
+            break
+        fi
+        sleep 2
+        wait_time=$((wait_time + 2))
+    done
+
+    if [[ -z "$tmpdir" ]]; then
+        warning "Could not detect TMPDIR from job output after ${wait_time}s"
+        return 1
+    fi
+
+    local vllm_out="${tmpdir}/vllm.out"
+    local vllm_err="${tmpdir}/vllm.err"
+
+    info "Streaming from: ${tmpdir}"
     info "Accessing files via login node (shared filesystem)"
     echo ""
 
