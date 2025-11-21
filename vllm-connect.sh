@@ -390,12 +390,13 @@ start_vllm_streaming() {
     local vllm_err="${workdir}/vllm.err"
 
     info "Streaming from: ${workdir}"
+    info "Accessing files via login node (shared filesystem)"
     echo ""
 
-    # Stream both vllm.out and vllm.err via SSH to compute node
-    # We use tail -f to show all lines from the beginning
+    # Stream both vllm.out and vllm.err via SSH to LOGIN node
+    # The TMPDIR is on shared storage, so we can access it from login node
     (
-        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" bash -s "${vllm_out}" "${vllm_err}" <<'REMOTE_SCRIPT'
+        ssh "${SSH_HOST}" bash -s "${vllm_out}" "${vllm_err}" <<'REMOTE_SCRIPT'
             vllm_out="$1"
             vllm_err="$2"
 
@@ -403,16 +404,23 @@ start_vllm_streaming() {
             BLUE='\033[0;34m'
             NC='\033[0m'
 
-            # Wait for files to be created (up to 30 seconds)
-            for i in {1..30}; do
+            # Wait for files to be created (up to 60 seconds)
+            for i in {1..60}; do
                 if [[ -f "$vllm_out" || -f "$vllm_err" ]]; then
                     break
                 fi
                 sleep 1
             done
 
+            # Check if files exist
+            if [[ ! -f "$vllm_out" && ! -f "$vllm_err" ]]; then
+                echo "Warning: vLLM output files not found after waiting"
+                exit 1
+            fi
+
             # Stream both files, prefixing each line with [vLLM]
-            tail -f "$vllm_out" "$vllm_err" 2>/dev/null | while IFS= read -r line; do
+            # Use tail -F to follow files even if they don't exist yet
+            tail -F "$vllm_out" "$vllm_err" 2>/dev/null | while IFS= read -r line; do
                 printf "${BLUE}[vLLM]${NC} %s\n" "$line"
             done
 REMOTE_SCRIPT
