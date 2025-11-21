@@ -19,15 +19,14 @@ export MODEL_NAME=$(echo "$HF_MODEL" | sed -n 's#.*/models--\([^/]*\)--\([^/]*\)
 export SIF_IMAGE=/apps/containers/vLLM/vllm-0.11.0.sif
 
 # start vllm server
-# Output streams to vllm.out (stdout) and vllm.err (stderr) for real-time monitoring
+# Output goes to SLURM output file for easy streaming from login node
 vllm_opts="--tensor-parallel-size=${SLURM_GPUS_ON_NODE} --max-model-len={{MAX_MODEL_LEN}}"
 
 echo "Starting vLLM server..."
-echo "Output will be written to: ${TMPDIR}/vllm.out and ${TMPDIR}/vllm.err"
+echo "=== vLLM OUTPUT START ==="
 apptainer exec ${SIF_IMAGE} vllm serve ${HF_MODEL} \
    --port ${API_PORT} ${vllm_opts} \
-   --served-model-name $MODEL_NAME \
-   > vllm.out 2> vllm.err &
+   --served-model-name $MODEL_NAME &
 VLLM_PID=$!
 sleep 20
 

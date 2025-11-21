@@ -388,63 +388,54 @@ start_vllm_streaming() {
 
     local slurm_out="${submitdir}/slurm-${JOB_ID}.out"
 
-    # Extract the actual TMPDIR from the jobscript output
-    # The jobscript prints: "Output will be written to: ${TMPDIR}/vllm.out and ${TMPDIR}/vllm.err"
-    info "Detecting TMPDIR from job output..."
-    local tmpdir
-
-    # Wait up to 30 seconds for the TMPDIR line to appear
-    local wait_time=0
-    while [[ $wait_time -lt 30 ]]; do
-        tmpdir=$(ssh -o ConnectTimeout=10 "${SSH_HOST}" "grep -oP 'Output will be written to: \K\S+(?=/vllm\.out)' ${slurm_out} 2>/dev/null | head -1" || echo "")
-        if [[ -n "$tmpdir" ]]; then
-            break
-        fi
-        sleep 2
-        wait_time=$((wait_time + 2))
-    done
-
-    if [[ -z "$tmpdir" ]]; then
-        warning "Could not detect TMPDIR from job output after ${wait_time}s"
-        return 1
-    fi
-
-    local vllm_out="${tmpdir}/vllm.out"
-    local vllm_err="${tmpdir}/vllm.err"
-
-    info "Streaming from: ${tmpdir}"
-    info "Accessing files via login node (shared filesystem)"
+    info "Streaming from: ${slurm_out}"
+    info "Waiting for vLLM output to start..."
     echo ""
 
-    # Stream both vllm.out and vllm.err via SSH to LOGIN node
-    # The TMPDIR is on shared storage, so we can access it from login node
+    # Stream from SLURM output file via SSH to LOGIN node
+    # Filter lines after the vLLM output marker
     (
-        ssh "${SSH_HOST}" bash -s "${vllm_out}" "${vllm_err}" <<'REMOTE_SCRIPT'
-            vllm_out="$1"
-            vllm_err="$2"
+        ssh "${SSH_HOST}" bash -s "${slurm_out}" <<'REMOTE_SCRIPT'
+            slurm_out="$1"
 
             # Define colors in the remote script
             BLUE='\033[0;34m'
             NC='\033[0m'
 
-            # Wait for files to be created (up to 60 seconds)
-            for i in {1..60}; do
-                if [[ -f "$vllm_out" || -f "$vllm_err" ]]; then
+            # Wait for the SLURM output file to be created (up to 30 seconds)
+            for i in {1..30}; do
+                if [[ -f "$slurm_out" ]]; then
                     break
                 fi
                 sleep 1
             done
 
-            # Check if files exist
-            if [[ ! -f "$vllm_out" && ! -f "$vllm_err" ]]; then
-                echo "Warning: vLLM output files not found after waiting"
+            if [[ ! -f "$slurm_out" ]]; then
+                echo "Warning: SLURM output file not found after waiting"
                 exit 1
             fi
 
-            # Stream both files, prefixing each line with [vLLM]
-            # Use tail -F to follow files even if they don't exist yet
-            tail -F "$vllm_out" "$vllm_err" 2>/dev/null | while IFS= read -r line; do
-                printf "${BLUE}[vLLM]${NC} %s\n" "$line"
+            # Wait for vLLM output to start
+            for i in {1..30}; do
+                if grep -q "=== vLLM OUTPUT START ===" "$slurm_out" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+
+            # Stream the SLURM output, showing only lines after the vLLM marker
+            # Use tail -F to follow the file
+            tail -F "$slurm_out" 2>/dev/null | while IFS= read -r line; do
+                # Once we see the marker, start showing output with [vLLM] prefix
+                if [[ "$line" == *"=== vLLM OUTPUT START ==="* ]]; then
+                    started=1
+                    continue
+                fi
+
+                # Show lines after the marker
+                if [[ -n "$started" ]]; then
+                    printf "${BLUE}[vLLM]${NC} %s\n" "$line"
+                fi
             done
 REMOTE_SCRIPT
     ) &
