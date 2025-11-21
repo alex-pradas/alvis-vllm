@@ -425,7 +425,7 @@ establish_tunnel() {
 
     # Test SSH connection first
     info "Testing SSH connection to ${node_name}..."
-    if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "echo 'Connection test successful'" 2>/dev/null; then
+    if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" "echo 'Connection test successful'" >/dev/null 2>&1; then
         error "Cannot establish SSH connection to ${node_name}"
         error "Make sure the job is still running on this node"
         exit 1
@@ -436,7 +436,7 @@ establish_tunnel() {
         -o StrictHostKeyChecking=no \
         -o ExitOnForwardFailure=yes \
         -J "${SSH_JUMP_HOST}" \
-        "${SSH_USER}@${node_name}" &
+        "${SSH_USER}@${node_name}" 2>/dev/null &
 
     SSH_TUNNEL_PID=$!
 
