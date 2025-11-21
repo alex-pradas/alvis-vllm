@@ -395,11 +395,13 @@ start_vllm_streaming() {
     # Stream both vllm.out and vllm.err via SSH to compute node
     # We use tail -f to show all lines from the beginning
     (
-        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" bash -s "${vllm_out}" "${vllm_err}" "${BLUE}" "${NC}" <<'REMOTE_SCRIPT'
+        ssh -J "${SSH_JUMP_HOST}" "${SSH_USER}@${node_name}" bash -s "${vllm_out}" "${vllm_err}" <<'REMOTE_SCRIPT'
             vllm_out="$1"
             vllm_err="$2"
-            BLUE="$3"
-            NC="$4"
+
+            # Define colors in the remote script
+            BLUE='\033[0;34m'
+            NC='\033[0m'
 
             # Wait for files to be created (up to 30 seconds)
             for i in {1..30}; do
@@ -411,7 +413,7 @@ start_vllm_streaming() {
 
             # Stream both files, prefixing each line with [vLLM]
             tail -f "$vllm_out" "$vllm_err" 2>/dev/null | while IFS= read -r line; do
-                echo -e "${BLUE}[vLLM]${NC} $line"
+                printf "${BLUE}[vLLM]${NC} %s\n" "$line"
             done
 REMOTE_SCRIPT
     ) &
